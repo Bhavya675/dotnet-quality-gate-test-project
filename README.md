@@ -1,0 +1,1 @@
+# dotnet-quality-gate-test-project

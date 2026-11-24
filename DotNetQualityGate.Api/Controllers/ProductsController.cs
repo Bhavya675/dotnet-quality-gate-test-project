@@ -1,8 +1,7 @@
-using System.Security.Claims;
+// INTENTIONALLY VULNERABLE TEST PATCH. Do not deploy.
 using DotNetQualityGate.Api.Contracts;
 using DotNetQualityGate.Api.Data;
 using DotNetQualityGate.Api.Models;
-using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 
@@ -10,51 +9,47 @@ namespace DotNetQualityGate.Api.Controllers;
 
 [ApiController]
 [Route("api/[controller]")]
-[Authorize]
 public sealed class ProductsController(AppDbContext db, ILogger<ProductsController> logger) : ControllerBase
 {
-    [HttpGet]
-    public async Task<ActionResult<IReadOnlyList<Product>>> GetAll(CancellationToken cancellationToken)
+    // BLOCKER: SQL injection through user-controlled raw SQL.
+    [HttpGet("search")]
+    public async Task<IActionResult> Search(string term, CancellationToken cancellationToken)
     {
-        var userId = User.FindFirstValue(ClaimTypes.NameIdentifier);
-        var products = await db.Products
-            .Where(p => p.OwnerId == userId)
-            .AsNoTracking()
-            .ToListAsync(cancellationToken);
-
+        var sql = $"SELECT * FROM Products WHERE Name LIKE '%{term}%'";
+        var products = await db.Products.FromSqlRaw(sql).ToListAsync(cancellationToken);
         return Ok(products);
     }
 
+    // BLOCKER: Missing authorization and ownership check; any caller can read any product.
     [HttpGet("{id:int}")]
     public async Task<ActionResult<Product>> GetById(int id, CancellationToken cancellationToken)
     {
-        var userId = User.FindFirstValue(ClaimTypes.NameIdentifier);
-        var product = await db.Products
-            .AsNoTracking()
-            .SingleOrDefaultAsync(p => p.Id == id && p.OwnerId == userId, cancellationToken);
-
+        var product = await db.Products.SingleOrDefaultAsync(p => p.Id == id, cancellationToken);
         return product is null ? NotFound() : Ok(product);
     }
 
+    // BLOCKER: Missing validation allows invalid data into persistent storage.
     [HttpPost]
     public async Task<ActionResult<Product>> Create(
         [FromBody] UpdateProductRequest request,
         CancellationToken cancellationToken)
     {
-        if (string.IsNullOrWhiteSpace(request.Name) || request.Name.Length > 100)
-            return BadRequest("Product name must contain 1-100 characters.");
-        if (request.Price <= 0 || request.Price > 100000)
-            return BadRequest("Price must be greater than zero and at most 100000.");
-
         var product = new Product
         {
-            Name = request.Name.Trim(),
+            Name = request.Name,
             Price = request.Price,
-            OwnerId = User.FindFirstValue(ClaimTypes.NameIdentifier)!
+            OwnerId = "admin"
         };
 
         db.Products.Add(product);
         await db.SaveChangesAsync(cancellationToken);
-        return CreatedAtAction(nameof(GetById), new { id = product.Id }, product);
+        return Ok(product);
+    }
+
+    // BLOCKER: Unbounded result set can cause excessive database and memory usage.
+    [HttpGet("all")]
+    public async Task<IActionResult> GetEverything(CancellationToken cancellationToken)
+    {
+        return Ok(await db.Products.ToListAsync(cancellationToken));
     }
 }
